@@ -42,11 +42,15 @@ random.seed(42)
 
 # ------------------------------------------------------------------
 # fast HTTP layer
+# Increased concurrency (default 150), can be configured with env var
+MAX_THREADS = int(os.environ.get("GAU_THREADS", 150))
+_LOCK = threading.Semaphore(MAX_THREADS)
+
 session = requests.Session()
 _adapter = HTTPAdapter(
     max_retries=Retry(
         total=3,
-        backoff_factor=0.3,
+        backoff_factor=0.15,
         status_forcelist=[429, 500, 502, 503, 504],
     )
 )
@@ -54,10 +58,10 @@ session.mount("http://", _adapter)
 session.mount("https://", _adapter)
 session.headers.update({"User-Agent": "gau++/2.0"})
 
-_LOCK = threading.Semaphore(50)
 def _get(url: str, params=None) -> requests.Response:
     with _LOCK:
-        time.sleep(random.uniform(0.01, 0.04))
+        # Lower sleep for more aggressive fetching
+        time.sleep(random.uniform(0.001, 0.01))
     r = session.get(url, params=params, timeout=20)
     r.raise_for_status()
     return r
@@ -104,13 +108,13 @@ def parse_args(argv: List[str]):
     p.add_argument("-fe", metavar="EXTS", help="include only URLs with these extensions")
     p.add_argument("-e", metavar="EXTS", help=f"comma list of extensions to {C.RED}exclude{C.RESET}")
     p.add_argument("-o", metavar="FILE", help="output file [txt|json]")
-    p.add_argument("-r", metavar="SRCS", help=f"use only listed resources {C.CYAN}wbu,cc,otx,urlscan,cr,vt{C.RESET}")
+    p.add_argument("-r", metavar="SRCS", help=f"use only listed resources {C.CYAN}wbu,cc,otx,urlscan,cr,ht,rdns{C.RESET}")
     p.add_argument("-ss", action="store_true", help="show unique subdomains only")
 
     args = p.parse_args(argv)
 
     # --- validation -------------------------------------------------
-    allowed_srcs = {"wbu", "cc", "vt", "otx", "urlscan", "cr"}
+    allowed_srcs = {"wbu", "cc", "vt", "otx", "urlscan", "cr", "ht", "rdns"}
     if args.r:
         bad = [s for s in args.r.split(",") if s.strip().lower() not in allowed_srcs]
         if bad:
@@ -235,6 +239,44 @@ def get_crtsh_urls(domain: str, no_subs: bool) -> List[WURL]:
             out.append(WURL(date="", url=f"https://{sub}", status=None))
     return out
 
+# --- HackerTarget pagelinks (NEW) ------------------------------------------
+def get_hackertarget_urls(domain: str, no_subs: bool) -> List[WURL]:
+    # Returns plain URLs, one per line
+    url = f"https://api.hackertarget.com/pagelinks/?q={domain}"
+    try:
+        resp = _get(url).text
+    except Exception:
+        return []
+    urls = []
+    for line in resp.splitlines():
+        u = line.strip()
+        if u and not u.startswith("error"):
+            urls.append(WURL(date="", url=u, status=None))
+    return urls
+
+# --- RapidDNS subdomain (NEW) ---------------------------------------------
+def get_rapiddns_urls(domain: str, no_subs: bool) -> List[WURL]:
+    # Returns a CSV, first column is subdomain
+    url = f"https://rapiddns.io/subdomain/{domain}?full=1"
+    try:
+        resp = _get(url).text
+    except Exception:
+        return []
+    urls = []
+    # Some lines might be HTML; extract with regex
+    # Example: <td>sub.example.com</td><td>...</td>
+    for match in re.findall(r'<td>([a-zA-Z0-9_.-]+\.' + re.escape(domain) + r')</td>', resp):
+        u = f"https://{match.strip()}"
+        urls.append(WURL(date="", url=u, status=None))
+    # fallback: collect plain CSV lines
+    for line in resp.splitlines():
+        if ',' in line:
+            parts = line.split(',')
+            sub = parts[0].strip()
+            if sub.endswith(domain):
+                urls.append(WURL(date="", url=f"https://{sub}", status=None))
+    return urls
+
 # ------------------------------------------------------------------
 # Helpers
 def is_sub(raw_url: str, domain: str) -> bool:
@@ -340,6 +382,7 @@ def main(argv: List[str] = None):
                 print(v)
         return
 
+    # Added 'ht' for HackerTarget, 'rdns' for RapidDNS
     resource_map = {
         "wbu": get_wayback_urls,
         "cc":  get_commoncrawl_urls,
@@ -347,6 +390,8 @@ def main(argv: List[str] = None):
         "otx": get_otx_urls,
         "urlscan": get_urlscan_urls,
         "cr": get_crtsh_urls,
+        "ht": get_hackertarget_urls,
+        "rdns": get_rapiddns_urls,
     }
     srcs = resource_map.keys() if not args.r else [s.strip().lower() for s in str(args.r).split(",") if s.strip()]
     fetchers = [resource_map[s] for s in srcs if s in resource_map]
@@ -361,7 +406,7 @@ def main(argv: List[str] = None):
 
     for domain in domains:
         results: Dict[str, WURL] = {}
-        with ThreadPoolExecutor(max_workers=50) as ex:
+        with ThreadPoolExecutor(max_workers=MAX_THREADS) as ex:
             future_to_fetch = {ex.submit(fn, domain, args.ns): fn for fn in fetchers}
             for f in as_completed(future_to_fetch):
                 try:
