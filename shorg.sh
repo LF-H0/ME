@@ -1,5 +1,6 @@
 #!/bin/bash
 
+
 # this tool takes a file of urls as an input and then it creates folders, each folder represent a subdomain and inside each subdomain folder it organize urls in categories (E.g: patams.txt , json.txt , js.txt , css.txt ...etc )
 
 # Author: LF-H0
