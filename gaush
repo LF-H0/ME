@@ -1,6 +1,6 @@
 #!/bin/bash
 
-
+# this tool takes a  target domain as an input (E.g: example.com) and then it fetches urls from different online sources and then it creates folders, each folder represent a subdomain and inside each subdomain folder it organize urls in categories (E.g: patams.txt , json.txt , js.txt , css.txt ...etc )
 
 # Author: LF-H0
 # Last Updated: 2025-10-10 13:00:00 UTC
