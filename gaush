@@ -1,0 +1,340 @@
+#!/bin/bash
+
+# --- Configuration ---
+DOMAIN="$1"
+USER_AGENT="gaush/2.0"
+TMPFILE=$(mktemp) 
+
+# --- Input Validation ---
+if [ -z "$DOMAIN" ]; then
+    echo -e "\033[1;31m[-] Error: Please provide a domain name.\033[0m"
+    echo -e "\033[1;33mUsage: $0 <domain.com>\033[0m"
+    exit 1
+fi
+
+# --- Directory Structure Setup ---
+DOMAIN_DIR="$DOMAIN"
+ALL_DIR="$DOMAIN_DIR/all"
+mkdir -p "$DOMAIN_DIR" "$ALL_DIR"
+
+# --- Cleanup on Exit ---
+trap "rm -f $TMPFILE" EXIT
+
+# --- URL Fetching Functions (Parallelized) ---
+fetch_wayback() {
+    curl -s -A "$USER_AGENT" "https://web.archive.org/cdx/search/cdx?url=*.$DOMAIN/*&output=json&collapse=urlkey&fl=original" |
+    python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    if data and len(data) > 1:
+        for row in data[1:]:
+            url = row[0]
+            if url and '$DOMAIN' in url:
+                print(url)
+except Exception:
+    pass
+" >> "$TMPFILE"
+}
+
+fetch_otx() {
+    curl -s -A "$USER_AGENT" "https://otx.alienvault.com/api/v1/indicators/domain/$DOMAIN/url_list?limit=1000" |
+    python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    for item in data.get('url_list', []):
+        url = item.get('url', '')
+        if url and '$DOMAIN' in url:
+            print(url)
+except Exception:
+    pass
+" >> "$TMPFILE"
+}
+
+fetch_urlscan() {
+    curl -s -A "$USER_AGENT" "https://urlscan.io/api/v1/search/?q=domain:$DOMAIN&size=1000" |
+    python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    for item in data.get('results', []):
+        if 'page' in item and 'url' in item['page']:
+            url = item['page']['url']
+            if url and '$DOMAIN' in url:
+                print(url)
+except Exception:
+    pass
+" >> "$TMPFILE"
+}
+
+fetch_crtsh() {
+    curl -s -A "$USER_AGENT" "https://crt.sh/?q=%.$DOMAIN&output=json" |
+    python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    subdomains = set()
+    for entry in data:
+        for sub in entry.get('name_value', '').splitlines():
+            sub = sub.strip().lstrip('*.')
+            if sub and '$DOMAIN' in sub:
+                subdomains.add(f'https://{sub}')
+    for sub in subdomains:
+        print(sub)
+except Exception:
+    pass
+" >> "$TMPFILE"
+}
+
+fetch_hackertarget() {
+    curl -s -A "$USER_AGENT" "https://api.hackertarget.com/pagelinks/?q=$DOMAIN" |
+    grep -Eo "https?://[^/]*$DOMAIN[^[:space:]]*" >> "$TMPFILE"
+}
+
+fetch_rapiddns() {
+    curl -s -A "$USER_AGENT" "https://rapiddns.io/subdomain/$DOMAIN?full=1" |
+    grep -Eo 'https?://[a-zA-Z0-9_.-]+\.'"$DOMAIN" >> "$TMPFILE"
+}
+
+
+# --- Main Execution ---
+echo -e "\033[1;36m[*] Starting URL collection for \033[1;33m$DOMAIN\033[0m"
+echo -e "\033[1;32m[+] Fetching URLs from multiple sources in parallel...\033[0m"
+
+# Run all fetchers in the background for maximum speed
+fetch_wayback &
+fetch_otx &
+fetch_urlscan &
+fetch_crtsh &
+fetch_hackertarget &
+fetch_rapiddns &
+
+# Wait for all background jobs to finish
+wait
+
+echo -e "\033[1;32m[+] Fetching complete. Processing and categorizing URLs...\033[0m"
+
+# Sort, deduplicate, and pipe directly to the Python script for processing
+sort -u "$TMPFILE" | python3 -c "
+import re
+import os
+import sys
+import urllib.parse
+from collections import defaultdict
+
+# Read all unique URLs from stdin
+urls = [line.strip() for line in sys.stdin if line.strip()]
+
+# List of common file extensions to check against
+COMMON_EXTENSIONS = {
+    'html', 'htm', 'php', 'asp', 'aspx', 'jsp', 'js', 'css', 'json', 'xml', 'txt',
+    'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'zip', 'rar', 'tar', 'gz',
+    'jpg', 'jpeg', 'png', 'gif', 'bmp', 'svg', 'ico', 'mp3', 'mp4', 'avi', 'mov',
+    'sql', 'log', 'ini', 'conf', 'cfg', 'yml', 'yaml', 'md', 'py', 'java', 'c', 'cpp',
+    'swf', 'flv', 'woff', 'woff2', 'ttf', 'eot', 'map', 'bak', 'old', 'tmp', 'sql'
+}
+
+# Patterns for sensitive URLs
+ADMIN_PATTERNS = [
+    r'admin', r'administrator', r'admin\.php', r'admin\.html', r'admin/login',
+    r'login', r'logout', r'signin', r'signup', r'register', r'wp-admin', r'wp-login',
+    r'panel', r'cpanel', r'control', r'dashboard', r'config', r'configuration',
+    r'settings', r'account', r'profile', r'user', r'manager', r'manage', r'console'
+]
+
+# Statistics dictionary
+stats = {
+    'total_urls': len(urls),
+    'subdomains': set(),
+    'urls_with_params': 0,
+    'file_types': defaultdict(int),
+    'other_urls_count': 0,
+    'admin_urls_count': 0,
+    'sensitive_urls_count': 0
+}
+
+# Group URLs by subdomain
+subdomain_urls = defaultdict(list)
+
+# --- Main Processing Loop ---
+for url in urls:
+    try:
+        parsed = urllib.parse.urlparse(url)
+        # Strip port number from subdomain
+        subdomain = parsed.netloc.split(':')[0]
+
+        stats['subdomains'].add(subdomain)
+        subdomain_urls[subdomain].append(url)
+
+        # Check for parameters
+        if '?' in url:
+            stats['urls_with_params'] += 1
+
+        # Extract file extension
+        path = parsed.path.lower()
+        ext_match = re.search(r'\.([a-zA-Z0-9]+)(?:\?|$)', path)
+        if ext_match:
+            ext = ext_match.group(1)
+            if ext in COMMON_EXTENSIONS:
+                stats['file_types'][ext] += 1
+
+    except Exception:
+        continue
+
+# --- Write Files for Each Subdomain ---
+for subdomain, url_list in subdomain_urls.items():
+    subdomain_dir = os.path.join('$DOMAIN_DIR', subdomain)
+    os.makedirs(subdomain_dir, exist_ok=True)
+
+    params_urls = []
+    file_type_urls = defaultdict(list)
+    admin_urls = []
+    sensitive_urls = []
+    other_urls = []
+
+    for url in url_list:
+        try:
+            parsed = urllib.parse.urlparse(url)
+            path = parsed.path.lower()
+            has_params = '?' in url
+
+            # Check for admin/sensitive URLs
+            is_admin = any(re.search(pattern, path, re.IGNORECASE) for pattern in ADMIN_PATTERNS)
+
+            if has_params:
+                params_urls.append(url)
+
+            # Extract file extension
+            ext_match = re.search(r'\.([a-zA-Z0-9]+)(?:\?|$)', path)
+            if ext_match:
+                ext = ext_match.group(1)
+                if ext in COMMON_EXTENSIONS:
+                    file_type_urls[ext].append(url)
+                    continue
+
+            # Categorize as admin, sensitive, or other
+            if is_admin:
+                admin_urls.append(url)
+            elif any(keyword in path for keyword in ['backup', 'config', 'database', 'db', 'test', 'dev', 'staging']):
+                sensitive_urls.append(url)
+            else:
+                other_urls.append(url)
+
+        except Exception:
+            continue
+
+    # Write params.txt
+    if params_urls:
+        with open(os.path.join(subdomain_dir, 'params.txt'), 'w') as f:
+            f.write('\n'.join(sorted(params_urls)))
+
+    # Write files by extension
+    for ext, ext_urls in file_type_urls.items():
+        with open(os.path.join(subdomain_dir, f'{ext}.txt'), 'w') as f:
+            f.write('\n'.join(sorted(ext_urls)))
+
+    # Write admin.txt
+    if admin_urls:
+        with open(os.path.join(subdomain_dir, 'admin.txt'), 'w') as f:
+            f.write('\n'.join(sorted(admin_urls)))
+        stats['admin_urls_count'] += len(admin_urls)
+
+    # Write sensitive.txt
+    if sensitive_urls:
+        with open(os.path.join(subdomain_dir, 'sensitive.txt'), 'w') as f:
+            f.write('\n'.join(sorted(sensitive_urls)))
+        stats['sensitive_urls_count'] += len(sensitive_urls)
+
+    # Write others.txt
+    if other_urls:
+        with open(os.path.join(subdomain_dir, 'others.txt'), 'w') as f:
+            f.write('\n'.join(sorted(other_urls)))
+        stats['other_urls_count'] += len(other_urls)
+
+
+# --- Write Aggregated Files in the 'all' Directory ---
+all_params = []
+all_file_type_urls = defaultdict(list)
+all_admin_urls = []
+all_sensitive_urls = []
+all_other_urls = []
+
+for url in urls:
+    try:
+        parsed = urllib.parse.urlparse(url)
+        path = parsed.path.lower()
+        has_params = '?' in url
+
+        # Check for admin/sensitive URLs
+        is_admin = any(re.search(pattern, path, re.IGNORECASE) for pattern in ADMIN_PATTERNS)
+
+        if has_params:
+            all_params.append(url)
+
+        # Extract file extension
+        ext_match = re.search(r'\.([a-zA-Z0-9]+)(?:\?|$)', path)
+        if ext_match:
+            ext = ext_match.group(1)
+            if ext in COMMON_EXTENSIONS:
+                all_file_type_urls[ext].append(url)
+                continue
+
+        # Categorize as admin, sensitive, or other
+        if is_admin:
+            all_admin_urls.append(url)
+        elif any(keyword in path for keyword in ['backup', 'config', 'database', 'db', 'test', 'dev', 'staging']):
+            all_sensitive_urls.append(url)
+        else:
+            all_other_urls.append(url)
+
+    except Exception:
+        continue
+
+# Write all-urls.txt
+with open(os.path.join('$ALL_DIR', 'all-urls.txt'), 'w') as f:
+    f.write('\n'.join(sorted(urls)))
+
+# Write all-params.txt
+if all_params:
+    with open(os.path.join('$ALL_DIR', 'all-params.txt'), 'w') as f:
+        f.write('\n'.join(sorted(all_params)))
+
+# Write all files by extension
+for ext, ext_urls in all_file_type_urls.items():
+    with open(os.path.join('$ALL_DIR', f'all-{ext}.txt'), 'w') as f:
+        f.write('\n'.join(sorted(ext_urls)))
+
+# Write all-admin.txt
+if all_admin_urls:
+    with open(os.path.join('$ALL_DIR', 'all-admin.txt'), 'w') as f:
+        f.write('\n'.join(sorted(all_admin_urls)))
+
+# Write all-sensitive.txt
+if all_sensitive_urls:
+    with open(os.path.join('$ALL_DIR', 'all-sensitive.txt'), 'w') as f:
+        f.write('\n'.join(sorted(all_sensitive_urls)))
+
+# Write all-others.txt
+if all_other_urls:
+    with open(os.path.join('$ALL_DIR', 'all-others.txt'), 'w') as f:
+        f.write('\n'.join(sorted(all_other_urls)))
+
+# --- Write Statistics File ---
+with open(os.path.join('$DOMAIN_DIR', 'statistics.txt'), 'w') as f:
+    f.write(f'Total URLs Found: {stats[\"total_urls\"]}\n')
+    f.write(f'Total Subdomains Found: {len(stats[\"subdomains\"])}\n')
+    f.write(f'Total URLs with Parameters: {stats[\"urls_with_params\"]}\n')
+    f.write(f'Total Admin URLs: {stats[\"admin_urls_count\"]}\n')
+    f.write(f'Total Sensitive URLs: {stats[\"sensitive_urls_count\"]}\n')
+    f.write(f'Total Other URLs: {stats[\"other_urls_count\"]}\n')
+    f.write('\n--- File Type Statistics ---\n')
+    for ext, count in sorted(stats['file_types'].items()):
+        f.write(f'{ext}: {count}\n')
+    f.write('\n--- Discovered Subdomains ---\n')
+    for subdomain in sorted(stats['subdomains']):
+        f.write(f'{subdomain}\n')
+"
+
+echo -e "\033[1;32m[+] URL collection and categorization complete.\033[0m"
+echo -e "\033[1;32m[+] Results saved in the '\033[1;33m$DOMAIN_DIR\033[1;32m' directory.\033[0m"
