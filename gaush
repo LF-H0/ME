@@ -1,5 +1,11 @@
 #!/bin/bash
 
+
+
+# Author: LF-H0
+# Last Updated: 2025-10-10 13:00:00 UTC
+
+
 # --- Configuration ---
 DOMAIN="$1"
 USER_AGENT="gaush/2.0"
