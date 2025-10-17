@@ -13,7 +13,9 @@ import secrets
 import re
 import html as html_mod
 from urllib.parse import urlsplit, parse_qs, urlencode, urlunsplit, unquote, quote, quote_plus
-from colorama import init as colorama_init, Fore, Style from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError colorama_init(autoreset=True)
+from colorama import init as colorama_init, Fore, Style from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
+
+colorama_init(autoreset=True)
 
 VERSION = "v2.3.1"
 DEFAULT_DRIVERS = 5
