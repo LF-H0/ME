@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 
 # advanced xss scanner, super fast && super accurate (0 false positives/negatives)
+# it needs more adjustment 
 
 
 import os
