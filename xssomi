@@ -1,0 +1,479 @@
+#!/usr/bin/python3
+
+# xss scanner tool super fast && super accurate (0 flase positives/negatives)
+                                       import os                                                  import sys
+import argparse                                            import random                                              import asyncio                                             import time                                                import string
+import secrets                                             import re                                                  import html as html_mod                                    from urllib.parse import urlsplit, parse_qs, urlencode, urlunsplit, unquote, quote, quote_plus
+from colorama import init as colorama_init, Fore, Style    from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError                                                                                        colorama_init(autoreset=True)                              
+VERSION = "v2.3.1-colors-fixed"
+DEFAULT_DRIVERS = 5
+MAX_DRIVER_CAP = 20
+HEADLESS_DEFAULT = True
+DEFAULT_TIMEOUT = 0.5
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Safari/605.1.15",
+]
+
+def parse_args():
+    p = argparse.ArgumentParser(description="Playwright XSS scanner (Chromium, headless).")
+    p.add_argument('-t','--targets', required=True, help='Single URL or path to file with URLs.')
+    p.add_argument('-p','--payloads', required=True, help='Local payloads file (one per line).')
+    p.add_argument('-o','--output', required=False, help='Output file for vulnerable URLs only.')
+    p.add_argument('-v','--verbose', action='store_true', help='Verbose mode.')
+    p.add_argument('-d','--drivers', type=int, default=DEFAULT_DRIVERS, help='Concurrent browser contexts.')
+    p.add_argument('--timeout', type=float, default=DEFAULT_TIMEOUT, help='Dialog wait timeout (sec).')
+    p.add_argument('--skip', action='store_true', help='Skip testing parameters that are NOT reflected.')
+    return p.parse_args()
+
+def B(s): return Style.BRIGHT + s + Style.RESET_ALL
+
+def header(n):
+    print(B(Fore.YELLOW + f"[+] NUMBER OF REQUESTS : {n}"))
+
+def info_testing(url):
+    print(B(Fore.YELLOW + "[INFO]"), B(Fore.MAGENTA + "TESTING"), B(Fore.WHITE + url))
+
+def info_param_reflected(param):
+    sys.stdout.write(B(Fore.YELLOW + "[INFO]") + " ")
+    sys.stdout.write(B(Fore.WHITE + "PARAMETER") + " ")
+    sys.stdout.write(B(Fore.RED + f"{{{param}}}") + " ")
+    sys.stdout.write(B(Fore.WHITE + "IS REFLECTED.") + "\n")
+
+def info_param_not_reflected(param):
+    sys.stdout.write(B(Fore.YELLOW + "[INFO]") + " ")
+    sys.stdout.write(B(Fore.WHITE + "PARAMETER") + " ")
+    sys.stdout.write(B(Fore.RED + f"{{{param}}}") + " ")
+    sys.stdout.write(B(Fore.WHITE + "IS NOT REFLECTED.") + "\n")
+
+def vuln_print(display_url, dtype, dmsg):
+    sys.stdout.write(B(Fore.GREEN + "[VULN]") + " ")
+    sys.stdout.write(B(Fore.CYAN + display_url) + " ")
+    if dtype:
+        sys.stdout.write(B(Fore.MAGENTA + f"[{dtype.upper()}]") + " ")
+    sys.stdout.write(B(Fore.MAGENTA + ("{" + str(dmsg) + "}") if dmsg is not None else B(Fore.MAGENTA + "{}")) + "\n")
+
+def invuln_print(display_url):
+    sys.stdout.write(B(Fore.RED + "[INVULN]") + " ")
+    sys.stdout.write(B(Fore.WHITE + display_url) + "\n")
+
+def load_targets(arg):
+    if os.path.isfile(arg):
+        with open(arg,'r',encoding='utf-8',errors='ignore') as f:
+            return [ln.strip() for ln in f if ln.strip()]
+    return [arg.strip()]
+
+def load_payloads(path):
+    if not os.path.isfile(path):
+        print(Fore.RED + "[!] Payloads file not found.")
+        sys.exit(1)
+    with open(path,'r',encoding='utf-8',errors='ignore') as f:
+        return [ln.rstrip('\n') for ln in f if ln.strip()]
+
+def generate_payload_urls(url, payload):
+    out=[]
+    scheme,netloc,path,query_string,fragment = urlsplit(url)
+    if not scheme:
+        scheme='http'
+    qs = parse_qs(query_string, keep_blank_values=True)
+    for key in qs.keys():
+        m = qs.copy()
+        m[key] = [payload]
+        out.append(urlunsplit((scheme,netloc,path,urlencode(m,doseq=True),fragment)))
+    if fragment:
+        if '=' in fragment:
+            frag_params = parse_qs(fragment, keep_blank_values=True)
+            for key in frag_params.keys():
+                mm = frag_params.copy()
+                mm[key]=[payload]
+                out.append(urlunsplit((scheme,netloc,path,query_string,urlencode(mm,doseq=True))))
+        else:
+            out.append(urlunsplit((scheme,netloc,path,query_string,payload)))
+    if not qs and not fragment:
+        out.append(urlunsplit((scheme,netloc,path,urlencode({'test':payload}),'')))
+        out.append(urlunsplit((scheme,netloc,path,query_string,payload)))
+    seen=set()
+    res=[]
+    for u in out:
+        if u not in seen:
+            seen.add(u)
+            res.append(u)
+    return res
+
+def build_clean_display_url(candidate_url, original_payload):
+    try:
+        p = urlsplit(candidate_url)
+        qs = parse_qs(p.query, keep_blank_values=True)
+        if qs:
+            parts=[]
+            replaced=False
+            for k,vals in qs.items():
+                for v in vals:
+                    try:
+                        if not replaced and unquote(v)==original_payload:
+                            parts.append(f"{k}={original_payload}")
+                            replaced=True
+                        else:
+                            parts.append(f"{k}={v}")
+                    except:
+                        parts.append(f"{k}={v}")
+            return f"{p.scheme}://{p.netloc}{p.path}?{'&'.join(parts)}"
+        if p.fragment:
+            try:
+                if unquote(p.fragment)==original_payload:
+                    return f"{p.scheme}://{p.netloc}{p.path}#{original_payload}"
+            except:
+                pass
+        return candidate_url
+    except:
+        return candidate_url
+
+async def create_driver(pw, headless=True, delay=0.05):
+    for _ in range(3):
+        try:
+            browser = await pw.chromium.launch(headless=headless, args=["--no-sandbox","--disable-dev-shm-usage","--disable-setuid-sandbox"])
+            context = await browser.new_context(ignore_https_errors=True, user_agent=random.choice(USER_AGENTS))
+            page = await context.new_page()
+            page.set_default_timeout(15*1000)
+            await asyncio.sleep(delay)
+            return {'browser':browser,'context':context,'page':page}
+        except:
+            await asyncio.sleep(0.08)
+    return None
+
+async def close_driver(d):
+    try:
+        await d['context'].close()
+    except:
+        pass
+    try:
+        await d['browser'].close()
+    except:
+        pass
+
+def marker():
+    return "XREF" + ''.join(secrets.choice(string.ascii_letters+string.digits) for _ in range(6))
+
+def marker_variants(m):
+    s=set()
+    s.add(m)
+    s.add(quote(m))
+    s.add(quote_plus(m))
+    s.add(html_mod.escape(m))
+    s.add(m.replace('"','&quot;').replace("'",'&#x27;'))
+    s.add(m.replace('<','&lt;').replace('>','&gt;'))
+    s.add(re.sub(r'[^A-Za-z0-9]','',m))
+    return {x.lower() for x in s}
+
+async def dom_contains_marker(page, mk):
+    try:
+        await page.wait_for_load_state("networkidle", timeout=2000)
+    except:
+        pass
+
+    await asyncio.sleep(0.1)
+
+    try:
+        html = (await page.content() or "").lower()
+    except:
+        html = ""
+
+    try:
+        inner = (await page.evaluate("() => document.documentElement && document.documentElement.innerHTML ? document.documentElement.innerHTML : ''") or "").lower()
+    except:
+        inner = ""
+
+    try:
+        text = (await page.evaluate("() => document.body && document.body.innerText ? document.body.innerText : ''") or "").lower()
+    except:
+        text = ""
+
+    try:
+        url = (await page.evaluate("() => window.location.href") or "").lower()
+    except:
+        url = ""
+
+    combined = html + "\n" + inner + "\n" + text + "\n" + url
+
+    variants = marker_variants(mk)
+    for v in variants:
+        if v and v in combined:
+            return True
+
+    alnum = re.sub(r'[^A-Za-z0-9]','', mk).lower()
+    if alnum and re.search(re.escape(alnum), combined):
+        return True
+
+    return False
+
+async def reflection_for_target(pw, target):
+    drv = await create_driver(pw, headless=HEADLESS_DEFAULT, delay=0.04)
+    if not drv:
+        return set()
+
+    page = drv['page']
+    parsed = urlsplit(target)
+    qs = parse_qs(parsed.query, keep_blank_values=True)
+    reflected = set()
+
+    info_testing(target)
+
+    if not qs:
+        sys.stdout.write(B(Fore.YELLOW + "[INFO]") + " " + B(Fore.WHITE + target) + " " + B(Fore.YELLOW + "[NO PARAMETERS]") + "\n")
+        await close_driver(drv)
+        return reflected
+
+    for param in qs.keys():
+        mk = marker()
+        new_q = qs.copy()
+        new_q[param] = [mk]
+        url_marker = urlunsplit((parsed.scheme or 'http', parsed.netloc, parsed.path, urlencode(new_q, doseq=True), parsed.fragment))
+
+        try:
+            await page.goto(url_marker, wait_until="domcontentloaded", timeout=4000)
+        except:
+            pass
+
+        is_ref = await dom_contains_marker(page, mk)
+        if is_ref:
+            info_param_reflected(param)
+            reflected.add(param)
+        else:
+            info_param_not_reflected(param)
+
+    await close_driver(drv)
+    return reflected
+
+async def check_payload(driver, candidate_url, payload, timeout, scan_state, results, verbose):
+    try:
+        page = driver['page']
+        scan_state['total_scanned'] += 1
+
+        if scan_state.get('interrupted'):
+            return
+
+        dialog = {'seen':False,'type':None,'message':None}
+
+        async def on_dialog(dlg):
+            dialog['seen'] = True
+            dialog['type'] = getattr(dlg,'type',None) or 'alert'
+            dialog['message'] = getattr(dlg,'message',None) or ''
+            try:
+                await dlg.accept()
+            except:
+                pass
+
+        page.on('dialog', on_dialog)
+
+        try:
+            try:
+                await page.goto(candidate_url, wait_until="domcontentloaded", timeout=int(timeout*1000))
+            except PlaywrightTimeoutError:
+                pass
+        except Exception as e:
+            if verbose and not scan_state.get('interrupted'):
+                invuln_print(build_clean_display_url(candidate_url, payload))
+            try:
+                page.off('dialog', on_dialog)
+            except:
+                pass
+            return
+
+        if scan_state.get('interrupted'):
+            try:
+                page.off('dialog', on_dialog)
+            except:
+                pass
+            return
+
+        await asyncio.sleep(min(0.3, max(0.03, timeout*0.1)))
+
+        if scan_state.get('interrupted'):
+            try:
+                page.off('dialog', on_dialog)
+            except:
+                pass
+            return
+
+        display = build_clean_display_url(candidate_url, payload)
+
+        if dialog['seen']:
+            if not scan_state.get('interrupted'):
+                results.append({'candidate_url':candidate_url,'payload':payload,'dialog_type':dialog['type'],'dialog_message':dialog['message']})
+                vuln_print(display, dialog['type'], dialog['message'])
+            try:
+                page.off('dialog', on_dialog)
+            except:
+                pass
+            return
+
+        try:
+            dlg = await page.wait_for_event('dialog', timeout=int(timeout*800))
+            dtype = getattr(dlg,'type',None) or 'alert'
+            dmsg = getattr(dlg,'message',None) or ''
+            try:
+                await dlg.accept()
+            except:
+                pass
+            if not scan_state.get('interrupted'):
+                results.append({'candidate_url':candidate_url,'payload':payload,'dialog_type':dtype,'dialog_message':dmsg})
+                vuln_print(display, dtype, dmsg)
+            try:
+                page.off('dialog', on_dialog)
+            except:
+                pass
+            return
+        except PlaywrightTimeoutError:
+            if verbose and not scan_state.get('interrupted'):
+                try:
+                    html = await page.content()
+                    if payload in html:
+                        invuln_print(display)
+                    else:
+                        invuln_print(display)
+                except:
+                    invuln_print(display)
+        except:
+            pass
+        finally:
+            try:
+                page.off('dialog', on_dialog)
+            except:
+                pass
+    except Exception as e:
+        if not scan_state.get('interrupted'):
+            try:
+                page.off('dialog', on_dialog)
+            except:
+                pass
+
+async def run(targets, payloads, output_path, verbose, drivers_count, timeout, skip_unreflected):
+    candidates_total = 0
+    per_target_candidates = {}
+
+    for t in targets:
+        per_target_candidates[t] = []
+        for p in payloads:
+            gs = generate_payload_urls(t, p)
+            per_target_candidates[t].extend([(g,p) for g in gs])
+            candidates_total += len(gs)
+
+    header(candidates_total)
+    results = []
+    scan_state = {'total_scanned':0,'total_found':0,'interrupted':False}
+
+    drivers = max(1, min(drivers_count, MAX_DRIVER_CAP, candidates_total or 1))
+
+    async with async_playwright() as pw:
+        reflected_global = {}
+
+        for t in targets:
+            if scan_state.get('interrupted'):
+                break
+
+            reflected = await reflection_for_target(pw, t)
+            reflected_global[t] = reflected
+
+            filtered = []
+            for candidate_url, payload in per_target_candidates[t]:
+                parsed = urlsplit(candidate_url)
+                qs = parse_qs(parsed.query, keep_blank_values=True)
+                if not qs:
+                    filtered.append((candidate_url,payload))
+                elif skip_unreflected:
+                    ok=False
+                    for k in qs.keys():
+                        if k in reflected:
+                            ok=True
+                            break
+                    if ok:
+                        filtered.append((candidate_url,payload))
+                else:
+                    filtered.append((candidate_url,payload))
+
+            if not filtered:
+                continue
+
+            driver_q = asyncio.Queue()
+            for _ in range(drivers):
+                if scan_state.get('interrupted'):
+                    break
+                drv = await create_driver(pw, headless=HEADLESS_DEFAULT, delay=0.03)
+                if drv:
+                    await driver_q.put(drv)
+
+            if driver_q.empty():
+                print(Fore.RED + "[!] Could not create browser contexts for scanning. Abort.")
+                return results, scan_state
+
+            sem = asyncio.Semaphore(drivers)
+
+            async def worker(cand, payl):
+                if scan_state.get('interrupted'):
+                    return
+                async with sem:
+                    if scan_state.get('interrupted'):
+                        return
+                    drv = await driver_q.get()
+                    try:
+                        await check_payload(drv, cand, payl, timeout, scan_state, results, verbose)
+                    finally:
+                        if not scan_state.get('interrupted'):
+                            await driver_q.put(drv)
+
+            tasks = [asyncio.create_task(worker(c,p)) for c,p in filtered]
+
+            try:
+                if tasks:
+                    await asyncio.gather(*tasks)
+            except KeyboardInterrupt:
+                scan_state['interrupted'] = True
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                break
+            except Exception as e:
+                pass
+
+            while not driver_q.empty():
+                d = await driver_q.get()
+                await close_driver(d)
+
+        scan_state['total_found'] = len(results)
+        return results, scan_state
+
+def write_txt(path, vulns):
+    lines = [build_clean_display_url(v['candidate_url'], v['payload']) for v in vulns]
+    with open(path,'w',encoding='utf-8') as f:
+        f.write("\n".join(lines))
+    print(Fore.YELLOW + f"[i] Wrote {len(lines)} vulnerable URLs to {path}")
+
+def main():
+    args = parse_args()
+    targets = load_targets(args.targets)
+    payloads = load_payloads(args.payloads)
+    start = time.time()
+
+    try:
+        results, scan_state = asyncio.run(run(targets, payloads, args.output, args.verbose, args.drivers, args.timeout, args.skip))
+    except KeyboardInterrupt:
+        print(Fore.RED + "\n[!] Scan interrupted by user")
+        sys.exit(1)
+    except Exception as e:
+        print(Fore.RED + f"\n[!] Error during scan: {e}")
+        sys.exit(1)
+
+    print("\n→ Scan finished.")
+    print(f"• Total found: {Fore.GREEN}{len(results)}{Style.RESET_ALL}")
+    print(f"• Total scanned: {scan_state['total_scanned']}")
+    print(f"• Time taken: {int(time.time()-start)} seconds")
+
+    if args.output and results:
+        if not args.output.lower().endswith('.txt'):
+            print(Fore.RED + "[!] Output must end with .txt")
+        else:
+            write_txt(args.output, results)
+
+if __name__ == '__main__':
+    main()
