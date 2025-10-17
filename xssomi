@@ -32,7 +32,7 @@ USER_AGENTS = [
 ]
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Playwright XSS scanner (Chromium, headless).")
+    p = argparse.ArgumentParser(description="advanced XSS scanner.")
     p.add_argument('-t','--targets', required=True, help='Single URL or path to file with URLs.')
     p.add_argument('-p','--payloads', required=True, help='Local payloads file (one per line).')
     p.add_argument('-o','--output', required=False, help='Output file for vulnerable URLs only.')
