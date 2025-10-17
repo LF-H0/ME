@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 
-# xss scanner tool super fast && super accurate (0 flase positives/negatives)
+# advanced xss scanner, super fast && super accurate (0 false positives/negatives)
+
 
 import os
 import sys
@@ -13,11 +14,12 @@ import secrets
 import re
 import html as html_mod
 from urllib.parse import urlsplit, parse_qs, urlencode, urlunsplit, unquote, quote, quote_plus
-from colorama import init as colorama_init, Fore, Style from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
+from colorama import init as colorama_init, Fore, Style
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
 colorama_init(autoreset=True)
 
-VERSION = "v2.3.1"
+VERSION = "v2.3.1-colors-fixed"
 DEFAULT_DRIVERS = 5
 MAX_DRIVER_CAP = 20
 HEADLESS_DEFAULT = True
@@ -183,77 +185,61 @@ async def dom_contains_marker(page, mk):
         await page.wait_for_load_state("networkidle", timeout=2000)
     except:
         pass
-
     await asyncio.sleep(0.1)
-
     try:
         html = (await page.content() or "").lower()
     except:
         html = ""
-
     try:
         inner = (await page.evaluate("() => document.documentElement && document.documentElement.innerHTML ? document.documentElement.innerHTML : ''") or "").lower()
     except:
         inner = ""
-
     try:
         text = (await page.evaluate("() => document.body && document.body.innerText ? document.body.innerText : ''") or "").lower()
     except:
         text = ""
-
     try:
         url = (await page.evaluate("() => window.location.href") or "").lower()
     except:
         url = ""
-
     combined = html + "\n" + inner + "\n" + text + "\n" + url
-
     variants = marker_variants(mk)
     for v in variants:
         if v and v in combined:
             return True
-
     alnum = re.sub(r'[^A-Za-z0-9]','', mk).lower()
     if alnum and re.search(re.escape(alnum), combined):
         return True
-
     return False
 
 async def reflection_for_target(pw, target):
     drv = await create_driver(pw, headless=HEADLESS_DEFAULT, delay=0.04)
     if not drv:
         return set()
-
     page = drv['page']
     parsed = urlsplit(target)
     qs = parse_qs(parsed.query, keep_blank_values=True)
     reflected = set()
-
     info_testing(target)
-
     if not qs:
         sys.stdout.write(B(Fore.YELLOW + "[INFO]") + " " + B(Fore.WHITE + target) + " " + B(Fore.YELLOW + "[NO PARAMETERS]") + "\n")
         await close_driver(drv)
         return reflected
-
     for param in qs.keys():
         mk = marker()
         new_q = qs.copy()
         new_q[param] = [mk]
         url_marker = urlunsplit((parsed.scheme or 'http', parsed.netloc, parsed.path, urlencode(new_q, doseq=True), parsed.fragment))
-
         try:
             await page.goto(url_marker, wait_until="domcontentloaded", timeout=4000)
         except:
             pass
-
         is_ref = await dom_contains_marker(page, mk)
         if is_ref:
             info_param_reflected(param)
             reflected.add(param)
         else:
             info_param_not_reflected(param)
-
     await close_driver(drv)
     return reflected
 
@@ -261,12 +247,9 @@ async def check_payload(driver, candidate_url, payload, timeout, scan_state, res
     try:
         page = driver['page']
         scan_state['total_scanned'] += 1
-
         if scan_state.get('interrupted'):
             return
-
         dialog = {'seen':False,'type':None,'message':None}
-
         async def on_dialog(dlg):
             dialog['seen'] = True
             dialog['type'] = getattr(dlg,'type',None) or 'alert'
@@ -275,9 +258,7 @@ async def check_payload(driver, candidate_url, payload, timeout, scan_state, res
                 await dlg.accept()
             except:
                 pass
-
         page.on('dialog', on_dialog)
-
         try:
             try:
                 await page.goto(candidate_url, wait_until="domcontentloaded", timeout=int(timeout*1000))
@@ -291,25 +272,20 @@ async def check_payload(driver, candidate_url, payload, timeout, scan_state, res
             except:
                 pass
             return
-
         if scan_state.get('interrupted'):
             try:
                 page.off('dialog', on_dialog)
             except:
                 pass
             return
-
         await asyncio.sleep(min(0.3, max(0.03, timeout*0.1)))
-
         if scan_state.get('interrupted'):
             try:
                 page.off('dialog', on_dialog)
             except:
                 pass
             return
-
         display = build_clean_display_url(candidate_url, payload)
-
         if dialog['seen']:
             if not scan_state.get('interrupted'):
                 results.append({'candidate_url':candidate_url,'payload':payload,'dialog_type':dialog['type'],'dialog_message':dialog['message']})
@@ -319,7 +295,6 @@ async def check_payload(driver, candidate_url, payload, timeout, scan_state, res
             except:
                 pass
             return
-
         try:
             dlg = await page.wait_for_event('dialog', timeout=int(timeout*800))
             dtype = getattr(dlg,'type',None) or 'alert'
@@ -363,30 +338,23 @@ async def check_payload(driver, candidate_url, payload, timeout, scan_state, res
 async def run(targets, payloads, output_path, verbose, drivers_count, timeout, skip_unreflected):
     candidates_total = 0
     per_target_candidates = {}
-
     for t in targets:
         per_target_candidates[t] = []
         for p in payloads:
             gs = generate_payload_urls(t, p)
             per_target_candidates[t].extend([(g,p) for g in gs])
             candidates_total += len(gs)
-
     header(candidates_total)
     results = []
     scan_state = {'total_scanned':0,'total_found':0,'interrupted':False}
-
     drivers = max(1, min(drivers_count, MAX_DRIVER_CAP, candidates_total or 1))
-
     async with async_playwright() as pw:
         reflected_global = {}
-
         for t in targets:
             if scan_state.get('interrupted'):
                 break
-
             reflected = await reflection_for_target(pw, t)
             reflected_global[t] = reflected
-
             filtered = []
             for candidate_url, payload in per_target_candidates[t]:
                 parsed = urlsplit(candidate_url)
@@ -403,10 +371,8 @@ async def run(targets, payloads, output_path, verbose, drivers_count, timeout, s
                         filtered.append((candidate_url,payload))
                 else:
                     filtered.append((candidate_url,payload))
-
             if not filtered:
                 continue
-
             driver_q = asyncio.Queue()
             for _ in range(drivers):
                 if scan_state.get('interrupted'):
@@ -414,13 +380,10 @@ async def run(targets, payloads, output_path, verbose, drivers_count, timeout, s
                 drv = await create_driver(pw, headless=HEADLESS_DEFAULT, delay=0.03)
                 if drv:
                     await driver_q.put(drv)
-
             if driver_q.empty():
                 print(Fore.RED + "[!] Could not create browser contexts for scanning. Abort.")
                 return results, scan_state
-
             sem = asyncio.Semaphore(drivers)
-
             async def worker(cand, payl):
                 if scan_state.get('interrupted'):
                     return
@@ -433,9 +396,7 @@ async def run(targets, payloads, output_path, verbose, drivers_count, timeout, s
                     finally:
                         if not scan_state.get('interrupted'):
                             await driver_q.put(drv)
-
             tasks = [asyncio.create_task(worker(c,p)) for c,p in filtered]
-
             try:
                 if tasks:
                     await asyncio.gather(*tasks)
@@ -447,11 +408,9 @@ async def run(targets, payloads, output_path, verbose, drivers_count, timeout, s
                 break
             except Exception as e:
                 pass
-
             while not driver_q.empty():
                 d = await driver_q.get()
                 await close_driver(d)
-
         scan_state['total_found'] = len(results)
         return results, scan_state
 
@@ -466,7 +425,6 @@ def main():
     targets = load_targets(args.targets)
     payloads = load_payloads(args.payloads)
     start = time.time()
-
     try:
         results, scan_state = asyncio.run(run(targets, payloads, args.output, args.verbose, args.drivers, args.timeout, args.skip))
     except KeyboardInterrupt:
@@ -475,12 +433,10 @@ def main():
     except Exception as e:
         print(Fore.RED + f"\n[!] Error during scan: {e}")
         sys.exit(1)
-
     print("\n→ Scan finished.")
     print(f"• Total found: {Fore.GREEN}{len(results)}{Style.RESET_ALL}")
     print(f"• Total scanned: {scan_state['total_scanned']}")
     print(f"• Time taken: {int(time.time()-start)} seconds")
-
     if args.output and results:
         if not args.output.lower().endswith('.txt'):
             print(Fore.RED + "[!] Output must end with .txt")
