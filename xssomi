@@ -1,7 +1,8 @@
 #!/usr/bin/python3
 
 # xss scanner tool super fast && super accurate (0 flase positives/negatives)
-                                       import os
+
+import os
 import sys
 import argparse
 import random
