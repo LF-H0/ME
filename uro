@@ -1,0 +1,44 @@
+#!/bin/bash
+# Usage: uro input.txt output.txt
+
+#this tool takes a file of urls, it removes duplicates and output only clean urls that has parameters.
+
+
+input="$1"
+output="$2"
+
+if [[ -z "$input" || -z "$output" ]]; then
+    echo "Usage: $0 <input_file> <output_file>"
+    exit 1
+fi
+
+awk '
+function normalize(url,   base, params, n, i, p, pair, key, normalized) {
+    split(url, parts, "?")
+    base = parts[1]
+    params = parts[2]
+    n = split(params, pair, "&")
+    normalized = base "?"
+    for (i = 1; i <= n; i++) {
+        split(pair[i], p, "=")
+        key = p[1]
+        if (key != "") {
+            normalized = normalized key "&"
+        }
+    }
+    sub(/&$/, "", normalized)
+    return normalized
+}
+
+BEGIN { FS=OFS="\n" }
+{
+    if ($0 ~ /\?/) {                                                               norm = normalize($0)
+        if (!(norm in seen)) {
+            seen[norm] = 1
+            print $0
+        }
+    }
+}
+' "$input" > "$output"
+
+echo "✅ Cleaned URLs saved to: $output"
