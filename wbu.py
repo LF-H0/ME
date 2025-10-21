@@ -23,7 +23,7 @@ def banner():
         Panel.fit(
             "[bold magenta]ArchiveReconX+ (MAX)[/bold magenta]\n"
             "[bold cyan]The Ultimate Archive.org Recon Tool for Hunters & Pentesters[/bold cyan]\n"
-            "[dim]By [bold]Copilot[/bold]"
+            "[dim]By [bold] https://github.com/LF-H0[/bold]"
         )
     )
 
