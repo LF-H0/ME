@@ -1,0 +1,7 @@
+
+# Custom aliases for proot-distro Debian login
+alias dr='proot-distro login debian'
+alias d='proot-distro login debian --user x747i'
+
+
+
