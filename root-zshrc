@@ -1,0 +1,21 @@
+# Auto-cd
+setopt AUTO_CD
+
+# History
+HISTFILE=~/.zsh_history
+HISTSIZE=1000
+SAVEHIST=1000
+
+# Plugins
+source ~/.zsh/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
+source ~/.zsh/zsh-autosuggestions/zsh-autosuggestions.zsh
+
+# Prompt - red # to warn you're root
+PROMPT='%F{1}%Broot%b%f%F{6}%B💀%b%f%F{2}%B%m%b%f:%F{4}%B%~%b%f%F{1}#%f '
+
+# Autosuggestions color (gray)
+ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE='fg=8'
+
+alias ls='ls --color=auto'
+alias ll='ls -la --color=auto'
+alias la='ls -A --color=auto'
